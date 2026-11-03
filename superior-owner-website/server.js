@@ -122,7 +122,7 @@ const server=http.createServer(async (req,res)=>{try{
  if(req.method==='POST'&&pathname==='/api/logout'){const token=cookieSession(req);if(token)sessions.delete(token);return json(res,200,{ok:true},{'Set-Cookie':'superior_sid=; HttpOnly; SameSite=Strict; Path=/; Max-Age=0'});}
  if(req.method==='GET'&&pathname==='/api/backup'){
    if(!ownerOnly(req,res))return;
-   const backup={app:'Superior Maintenance and Remodeling - Command Center',version:1,exportedAt:now(),estimates:db.estimates.filter(e=>e.status!=='declined'),invoices:db.invoices};
+   const backup={app:'Superior Maintenance and Remodeling - Command Center',version:1,exportedAt:now(),estimates:db.estimates.filter(e=>e.status!=='declined'),invoices:db.invoices,reviews:db.reviews};
    const filename=`Superior_Command_Center_Backup_${new Date().toISOString().slice(0,10)}.json`;
    res.writeHead(200,headers({'Content-Type':'application/json; charset=utf-8','Content-Disposition':`attachment; filename="${filename}"`}));
    return res.end(JSON.stringify(backup,null,2));
@@ -138,7 +138,7 @@ const server=http.createServer(async (req,res)=>{try{
    if(!input.estimates.every(validEstimate)||!input.invoices.every(validInvoice))return reject(res,400,'The backup contains invalid records.');
    if(new Set(input.estimates.map(e=>e.id)).size!==input.estimates.length||new Set(input.invoices.map(i=>i.id)).size!==input.invoices.length)return reject(res,400,'Duplicate record IDs in backup.');
    // Save a rollback snapshot on the same volume; the downloaded user backup remains the reliable off-site copy.
-   const prior=db;db={estimates:input.estimates,invoices:input.invoices};
+   const prior=db;db={estimates:input.estimates,invoices:input.invoices,reviews:Array.isArray(input.reviews)?input.reviews:[]};
    try{await persist();}catch(e){db=prior;throw e;}
    return json(res,200,{ok:true,estimates:db.estimates.length,invoices:db.invoices.length});
  }
@@ -153,12 +153,21 @@ const server=http.createServer(async (req,res)=>{try{
    if(req.method==='POST'&&matchEstimate[2]==='share') {if(['approved','declined'].includes(e.status))return reject(res,409,'This estimate has already received a decision.');e.reviewToken ||= crypto.randomBytes(32).toString('hex');e.status='sent';e.sharedAt ||= now();await persist();return json(res,200,{estimate:{...e,reviewToken:undefined},url:reviewUrl(req,e.reviewToken)});}
  }
  if(req.method==='GET'&&pathname==='/api/invoices'){if(!ownerOnly(req,res))return;return json(res,200,{invoices:db.invoices});}
+ if(req.method==='GET'&&pathname==='/api/reviews'){if(!ownerOnly(req,res))return;return json(res,200,{reviews:db.reviews});}
  const matchInvoice=pathname.match(/^\/api\/invoices\/(INV-[A-Za-z0-9-]+)\/mark-paid$/);
- if(req.method==='POST'&&matchInvoice){if(!ownerOnly(req,res))return;const inv=db.invoices.find(i=>i.id===matchInvoice[1]);if(!inv)return reject(res,404,'Invoice not found.');inv.paymentStatus='paid';inv.paidAt=now();await persist();return json(res,200,{invoice:inv});}
- const reviewMatch=pathname.match(/^\/api\/review\/([a-f0-9]{64})(?:\/decision)?$/);
+ if(req.method==='POST'&&matchInvoice){if(!ownerOnly(req,res))return;const inv=db.invoices.find(i=>i.id===matchInvoice[1]);if(!inv)return reject(res,404,'Invoice not found.');if(inv.paymentStatus==='paid')return json(res,200,{invoice:inv});inv.paymentStatus='paid';inv.paidAt=now();await persist();return json(res,200,{invoice:inv});}
+ const reviewMatch=pathname.match(/^\/api\/review\/([a-f0-9]{64})(?:\/(decision|feedback))?$/);
  if(reviewMatch){const e=db.estimates.find(x=>x.reviewToken===reviewMatch[1]);if(!e)return reject(res,404,'Estimate link not found or invalid.');
-  if(req.method==='GET'&&pathname.endsWith(reviewMatch[1]))return json(res,200,{estimate:publicEstimate(e)});
-  if(req.method==='POST'&&pathname.endsWith('/decision')){
+  if(req.method==='GET'&&!reviewMatch[2])return json(res,200,{estimate:publicEstimate(e),feedback:db.reviews.find(x=>x.estimateId===e.id)||null});
+  if(req.method==='POST'&&reviewMatch[2]==='feedback'){
+    if(!['approved','declined'].includes(e.status))return reject(res,409,'Complete your estimate decision before giving feedback.');
+    if(db.reviews.some(x=>x.estimateId===e.id))return reject(res,409,'Feedback was already submitted for this estimate.');
+    const input=await readBody(req);const rating=Number(input.rating),comment=safe(input.comment,2000);
+    if(!Number.isInteger(rating)||rating<1||rating>5)return reject(res,400,'Choose a rating from 1 to 5.');
+    const feedback={id:'REV-'+crypto.randomUUID(),estimateId:e.id,customer:e.customer,rating,comment,createdAt:now()};
+    db.reviews.unshift(feedback);await persist();return json(res,201,{feedback});
+   }
+   if(req.method==='POST'&&pathname.endsWith('/decision')){
     if(e.status!=='sent')return reject(res,409,'A decision has already been recorded or the estimate is unavailable.');const body=await readBody(req);if(!['approved','declined'].includes(body.decision))return reject(res,400,'Choose approve or decline.');
     const signature=safe(body.signature,120);if(!signature)return reject(res,400,'Please type your full name to confirm your choice.');e.status=body.decision;e.decidedAt=now();e.customerNote=safe(body.note,1000);e.customerSignature=signature;
     if(e.status==='approved'){
