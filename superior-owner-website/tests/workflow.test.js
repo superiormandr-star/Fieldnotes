@@ -22,6 +22,10 @@ test('owner creates quote, customer approves, invoice is generated and can be pa
  result=await call('/api/review/'+reviewToken);assert.equal(result.data.estimate.status,'sent');
  result=await call('/api/review/'+reviewToken+'/decision',{method:'POST',body:{decision:'approved',signature:'Customer Test',note:'Approved'}});assert.equal(result.status,200);assert.ok(result.data.invoiceId);
  result=await call('/api/review/'+reviewToken+'/decision',{method:'POST',body:{decision:'declined',signature:'Customer Test'}});assert.equal(result.status,409);
+ result=await call('/api/review/'+reviewToken+'/feedback',{method:'POST',body:{rating:5,comment:'Great estimate and communication'}});assert.equal(result.status,201);
+ result=await call('/api/review/'+reviewToken+'/feedback',{method:'POST',body:{rating:4}});assert.equal(result.status,409);
+ result=await call('/api/reviews',{auth:true});assert.equal(result.status,200);assert.equal(result.data.reviews.length,1);
+ assert.equal(result.data.reviews[0].rating,5);
  result=await call('/api/invoices',{auth:true});assert.equal(result.status,200);assert.equal(result.data.invoices.length,1);assert.equal(result.data.invoices[0].total,1240.2);
  result=await call('/api/invoices/'+result.data.invoices[0].id+'/mark-paid',{method:'POST',body:{},auth:true});assert.equal(result.status,200);assert.equal(result.data.invoice.paymentStatus,'paid');
  assert.equal(JSON.parse(fs.readFileSync(path.join(dir,'records.json'),'utf8')).invoices.length,1);
