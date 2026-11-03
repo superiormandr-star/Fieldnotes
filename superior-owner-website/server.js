@@ -10,6 +10,7 @@ const path = require('node:path');
 const crypto = require('node:crypto');
 const { URL } = require('node:url');
 const { GoogleDriveBackup } = require('./google-drive');
+const { Pool } = require('pg');
 const HOST = process.env.HOST || '0.0.0.0';
 const PORT = Number(process.env.PORT || 3000);
 const OWNER_PASSWORD = process.env.OWNER_PASSWORD || '';
@@ -23,10 +24,43 @@ const MAX_BODY = 100 * 1024;
 const MAX_RESTORE_BODY = 8 * 1024 * 1024;
 const MIME={'.html':'text/html; charset=utf-8','.css':'text/css; charset=utf-8','.js':'text/javascript; charset=utf-8','.png':'image/png','.jpg':'image/jpeg','.jpeg':'image/jpeg','.webp':'image/webp','.ico':'image/x-icon'};
 fs.mkdirSync(DATA_DIR,{recursive:true});
-let db={estimates:[],invoices:[]};
-if(fs.existsSync(DATA_FILE)) { try {const saved=JSON.parse(fs.readFileSync(DATA_FILE,'utf8')); if(Array.isArray(saved.estimates)&&Array.isArray(saved.invoices)) db=saved; else throw new Error('Invalid database format');}catch(e){ console.error('Cannot load data store:',e);process.exit(1);} }
+let db={estimates:[],invoices:[],reviews:[]};
+const DATABASE_URL=process.env.DATABASE_URL||'';
+const pool=DATABASE_URL?new Pool({connectionString:DATABASE_URL,max:1,connectionTimeoutMillis:10000,idleTimeoutMillis:30000}):null;
+let writeQueue=Promise.resolve();
+const validData=x=>x&&Array.isArray(x.estimates)&&Array.isArray(x.invoices);
+if(fs.existsSync(DATA_FILE)) { try {const saved=JSON.parse(fs.readFileSync(DATA_FILE,'utf8')); if(validData(saved)) db={...saved,reviews:Array.isArray(saved.reviews)?saved.reviews:[]}; else throw new Error('Invalid database format');}catch(e){ console.error('Cannot load data store:',e);process.exit(1);} }
 const googleDrive=new GoogleDriveBackup({dataDir:DATA_DIR,ownerPassword:OWNER_PASSWORD,getRecords:()=>db});
-const persist=()=>{ const tmp=DATA_FILE+'.'+crypto.randomBytes(6).toString('hex')+'.tmp';fs.writeFileSync(tmp,JSON.stringify(db,null,2),{mode:0o600});fs.renameSync(tmp,DATA_FILE);googleDrive.queueBackup();};
+async function initializeStorage(){
+ if(!pool){console.warn('PREVIEW MODE: no PostgreSQL configured; local JSON storage is not durable on Render free hosting.');return;}
+ await pool.query('CREATE TABLE IF NOT EXISTS superior_command_state (id SMALLINT PRIMARY KEY, records JSONB NOT NULL, updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW())');
+ const existing=await pool.query('SELECT records FROM superior_command_state WHERE id=1');
+ if(existing.rows.length){
+   const saved=existing.rows[0].records;
+   if(!validData(saved))throw Error('Existing PostgreSQL records failed validation; refusing to overwrite.');
+   db={...saved,reviews:Array.isArray(saved.reviews)?saved.reviews:[]};
+ }else{
+   await pool.query('INSERT INTO superior_command_state(id,records) VALUES(1,$1::jsonb) ON CONFLICT(id) DO NOTHING',[JSON.stringify(db)]);
+   const stored=await pool.query('SELECT records FROM superior_command_state WHERE id=1');
+   db={...stored.rows[0].records,reviews:stored.rows[0].records.reviews||[]};
+ }
+ console.log('Superior Command Center PostgreSQL storage is ready.');
+}
+function persist(){
+ const snapshot=JSON.stringify(db);
+ const write=writeQueue.then(async()=>{
+   if(pool){
+     const result=await pool.query('UPDATE superior_command_state SET records=$1::jsonb,updated_at=NOW() WHERE id=1',[snapshot]);
+     if(result.rowCount!==1)throw Error('PostgreSQL state row unavailable; records were not saved.');
+   }else{
+     const tmp=DATA_FILE+'.'+crypto.randomBytes(6).toString('hex')+'.tmp';
+     fs.writeFileSync(tmp,snapshot,{mode:0o600});fs.renameSync(tmp,DATA_FILE);
+   }
+   googleDrive.queueBackup();
+ });
+ writeQueue=write.catch(()=>{});
+ return write;
+}
 const cents=v=>Math.round(Number(v)*100);
 const money=v=>Number((v/100).toFixed(2));
 const safe=(v,max=200)=>String(v??'').trim().slice(0,max);
@@ -48,7 +82,7 @@ const publicEstimate=e=>({id:e.id,customer:e.customer,project:e.project,address:
 const reviewUrl=(req,token)=>{if(PUBLIC_BASE_URL) return `${PUBLIC_BASE_URL.replace(/\/$/,'')}/review/${token}`;const proto=(req.headers['x-forwarded-proto']==='https'||req.socket.encrypted)?'https':'http';return `${proto}://${req.headers.host}/review/${token}`;};
 const fileRoutes={'/owner/backup':'backup.html','/backup.html':'backup.html','/backup.css':'backup.css','/backup.js':'backup.js','/':'index.html','/index.html':'index.html','/owner':'owner.html','/owner.html':'owner.html','/styles.css':'styles.css','/script.js':'script.js','/owner.css':'owner.css','/owner.js':'owner.js','/review.js':'review.js'};
 const STATIC_ASSETS=new Set(['superior-logo.webp']);
-function staticFile(res,file){if(!fs.existsSync(file)||!fs.statSync(file).isFile())return reject(res,404,'Not found.');const mime=MIME[path.extname(file)]||'application/octet-stream';res.writeHead(200,headers({'Content-Type':mime,'Cache-Control':'public, max-age=300'}));fs.createReadStream(file).pipe(res);}
+function staticFile(res,file){if(!fs.existsSync(file)||!fs.statSync(file).isFile())return reject(res,404,'Not found.');const mime=MIME[path.extname(file)]||'application/octet-stream';res.writeHead(200,headers({'Content-Type':mime,'Cache-Control':'public, max-age=300'}));if(pool&&path.basename(file)==='owner.html')return res.end(fs.readFileSync(file,'utf8').replace(/<p class="preview-alert">[\s\S]*?<\/p>/g,''));fs.createReadStream(file).pipe(res);}
 const server=http.createServer(async (req,res)=>{try{
  const url=new URL(req.url,'http://localhost');const pathname=url.pathname;
  if(req.method==='GET'&&Object.hasOwn(fileRoutes,pathname))return staticFile(res,path.join(ROOT,fileRoutes[pathname]));
@@ -77,7 +111,8 @@ const server=http.createServer(async (req,res)=>{try{
    try{return json(res,200,{ok:true,...await googleDrive.backupNow()});}
    catch(e){return reject(res,503,e.message);}
  }
- if(req.method==='GET'&&pathname==='/api/session')return json(res,200,{authenticated:!!cookieSession(req)});
+ if(req.method==='GET'&&pathname==='/api/health')return json(res,pool?200:503,{ok:!!pool,service:'superior-command-center',database:pool?'ready':'preview-only'});
+ if(req.method==='GET'&&pathname==='/api/session')return json(res,200,{authenticated:!!cookieSession(req),durableStorage:!!pool});
  if(req.method==='POST'&&pathname==='/api/login'){
    const ip=safe(req.socket.remoteAddress||'unknown',80);const attempts=badLogins.get(ip)||[];const recent=attempts.filter(t=>t>Date.now()-15*60*1000);if(recent.length>=10)return reject(res,429,'Too many sign-in attempts. Try again later.');
    const input=await readBody(req);if(!equal(input.password||'',OWNER_PASSWORD)){recent.push(Date.now());badLogins.set(ip,recent);return reject(res,401,'Incorrect password.');}
@@ -104,22 +139,22 @@ const server=http.createServer(async (req,res)=>{try{
    if(new Set(input.estimates.map(e=>e.id)).size!==input.estimates.length||new Set(input.invoices.map(i=>i.id)).size!==input.invoices.length)return reject(res,400,'Duplicate record IDs in backup.');
    // Save a rollback snapshot on the same volume; the downloaded user backup remains the reliable off-site copy.
    const prior=db;db={estimates:input.estimates,invoices:input.invoices};
-   try{persist();}catch(e){db=prior;throw e;}
+   try{await persist();}catch(e){db=prior;throw e;}
    return json(res,200,{ok:true,estimates:db.estimates.length,invoices:db.invoices.length});
  }
  if(req.method==='GET'&&pathname==='/api/estimates'){if(!ownerOnly(req,res))return;return json(res,200,{estimates:db.estimates.map(({reviewToken,...e})=>e)});}
  if(req.method==='POST'&&pathname==='/api/estimates'){
    if(!ownerOnly(req,res))return;let e;try{e=makeEstimate(await readBody(req));}catch(err){return reject(res,400,err.message);}
-   e.id=idFor('EST',db.estimates);e.status='draft';e.createdAt=now();e.updatedAt=e.createdAt;db.estimates.unshift(e);persist();return json(res,201,{estimate:e});
+   e.id=idFor('EST',db.estimates);e.status='draft';e.createdAt=now();e.updatedAt=e.createdAt;db.estimates.unshift(e);await persist();return json(res,201,{estimate:e});
  }
  const matchEstimate=pathname.match(/^\/api\/estimates\/(EST-[A-Za-z0-9-]+)(?:\/(share))?$/);
  if(matchEstimate){if(!ownerOnly(req,res))return;const e=db.estimates.find(x=>x.id===matchEstimate[1]);if(!e)return reject(res,404,'Estimate not found.');
-   if(req.method==='PATCH'&&!matchEstimate[2]){if(e.status!=='draft')return reject(res,409,'Only drafts may be edited. Create a new estimate to revise a sent quote.');let update;try{update=makeEstimate(await readBody(req),e);}catch(err){return reject(res,400,err.message);}Object.assign(e,update,{updatedAt:now()});persist();return json(res,200,{estimate:e});}
-   if(req.method==='POST'&&matchEstimate[2]==='share') {if(['approved','declined'].includes(e.status))return reject(res,409,'This estimate has already received a decision.');e.reviewToken ||= crypto.randomBytes(32).toString('hex');e.status='sent';e.sharedAt ||= now();persist();return json(res,200,{estimate:{...e,reviewToken:undefined},url:reviewUrl(req,e.reviewToken)});}
+   if(req.method==='PATCH'&&!matchEstimate[2]){if(e.status!=='draft')return reject(res,409,'Only drafts may be edited. Create a new estimate to revise a sent quote.');let update;try{update=makeEstimate(await readBody(req),e);}catch(err){return reject(res,400,err.message);}Object.assign(e,update,{updatedAt:now()});await persist();return json(res,200,{estimate:e});}
+   if(req.method==='POST'&&matchEstimate[2]==='share') {if(['approved','declined'].includes(e.status))return reject(res,409,'This estimate has already received a decision.');e.reviewToken ||= crypto.randomBytes(32).toString('hex');e.status='sent';e.sharedAt ||= now();await persist();return json(res,200,{estimate:{...e,reviewToken:undefined},url:reviewUrl(req,e.reviewToken)});}
  }
  if(req.method==='GET'&&pathname==='/api/invoices'){if(!ownerOnly(req,res))return;return json(res,200,{invoices:db.invoices});}
  const matchInvoice=pathname.match(/^\/api\/invoices\/(INV-[A-Za-z0-9-]+)\/mark-paid$/);
- if(req.method==='POST'&&matchInvoice){if(!ownerOnly(req,res))return;const inv=db.invoices.find(i=>i.id===matchInvoice[1]);if(!inv)return reject(res,404,'Invoice not found.');inv.paymentStatus='paid';inv.paidAt=now();persist();return json(res,200,{invoice:inv});}
+ if(req.method==='POST'&&matchInvoice){if(!ownerOnly(req,res))return;const inv=db.invoices.find(i=>i.id===matchInvoice[1]);if(!inv)return reject(res,404,'Invoice not found.');inv.paymentStatus='paid';inv.paidAt=now();await persist();return json(res,200,{invoice:inv});}
  const reviewMatch=pathname.match(/^\/api\/review\/([a-f0-9]{64})(?:\/decision)?$/);
  if(reviewMatch){const e=db.estimates.find(x=>x.reviewToken===reviewMatch[1]);if(!e)return reject(res,404,'Estimate link not found or invalid.');
   if(req.method==='GET'&&pathname.endsWith(reviewMatch[1]))return json(res,200,{estimate:publicEstimate(e)});
@@ -129,10 +164,10 @@ const server=http.createServer(async (req,res)=>{try{
     if(e.status==='approved'){
       const inv={id:idFor('INV',db.invoices),estimateId:e.id,customer:e.customer,email:e.email,address:e.address,project:e.project,items:e.items,notes:e.notes,subtotal:e.subtotal,tax:e.tax,total:e.total,createdAt:now(),paymentStatus:'unpaid'};db.invoices.unshift(inv);e.invoiceId=inv.id;
     }
-    persist();return json(res,200,{estimate:publicEstimate(e),invoiceId:e.invoiceId||null});
+    await persist();return json(res,200,{estimate:publicEstimate(e),invoiceId:e.invoiceId||null});
   }
  }
  return reject(res,404,'Not found.');
  }catch(e){console.error('Server error:',e.message);return reject(res,e.message==='Request too large'?413:500,e.message==='Request too large'?'Request too large.':'Server error.');}});
-if(require.main===module) server.listen(PORT,HOST,()=>console.log(`Superior owner website: http://localhost:${PORT} | data: ${DATA_DIR}`));
+if(require.main===module) initializeStorage().then(()=>server.listen(PORT,HOST,()=>console.log(`Superior owner website listening on port ${PORT} | storage: ${pool?'PostgreSQL':'PREVIEW FILE'}`))).catch(e=>{console.error('Storage initialization failed:',e.message);process.exit(1);});
 module.exports={server};
