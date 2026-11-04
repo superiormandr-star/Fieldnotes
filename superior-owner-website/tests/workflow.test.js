@@ -1,4 +1,8 @@
 'use strict';
+// Tests must never inherit deployment database or backup credentials.
+process.env.DATABASE_URL='';
+process.env.PUBLIC_BASE_URL='';
+for (const key of Object.keys(process.env)) if (key.startsWith('GOOGLE_')) delete process.env[key];
 const {test}=require('node:test');
 const assert=require('node:assert/strict');
 const fs=require('node:fs');const os=require('node:os');const path=require('node:path');
