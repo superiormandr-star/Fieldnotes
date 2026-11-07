@@ -86,7 +86,7 @@ class GoogleDriveBackup {
  async createBackup(){
   const folder=await this.ensureFolder();
   const records=this.getRecords();
-  const payload=Buffer.from(JSON.stringify({app:APP_NAME,version:1,exportedAt:new Date().toISOString(),estimates:records.estimates.filter(e=>e.status!=='declined'),invoices:records.invoices,reviews:Array.isArray(records.reviews)?records.reviews:[]},null,2));
+  const payload=Buffer.from(JSON.stringify({app:APP_NAME,version:1,exportedAt:new Date().toISOString(),estimates:records.estimates,invoices:records.invoices,reviews:Array.isArray(records.reviews)?records.reviews:[]},null,2));
   const name='Superior_Command_Center_Backup_'+new Date().toISOString().replace(/[:.]/g,'-')+'_'+crypto.randomBytes(3).toString('hex')+'.json';
   const boundary='superior'+crypto.randomBytes(12).toString('hex');
   const meta=Buffer.from('--'+boundary+'\r\nContent-Type: application/json; charset=UTF-8\r\n\r\n'+JSON.stringify({name,mimeType:'application/json',parents:[folder]})+'\r\n--'+boundary+'\r\nContent-Type: application/json\r\n\r\n');
