@@ -1,70 +1,32 @@
-name: Recover Superior bindings and stop duplicate deployments
+name: Read-only Superior production readiness
 on:
   workflow_dispatch:
 permissions:
   contents: read
-concurrency:
-  group: superior-command-center-production
-  cancel-in-progress: false
 jobs:
-  recover:
+  inspect:
     runs-on: ubuntu-latest
     environment: CLOUDFLARE_API_TOKEN
+    defaults:
+      run:
+        working-directory: cloudflare-command-center
+    env:
+      CLOUDFLARE_ACCOUNT_ID: c917ac1c9a3824a210d0fb77e5879329
+      CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
     steps:
       - uses: actions/checkout@v4
+        with:
+          ref: main
       - uses: actions/setup-node@v4
         with:
           node-version: '24'
-      - name: Disable duplicate build and recover secret bindings by reference
-        env:
-          CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+      - name: Check deployment source
+        run: node scripts/inspect-deployment-source.mjs
+      - name: Inspect binding presence without values
+        run: node scripts/inspect-worker-settings.mjs
+      - name: Inspect encrypted Microsoft connection and confirmed upload receipt
+        run: node scripts/inspect-onedrive-readiness.mjs
+      - name: Check live website and D1 health
         run: |
-          node --input-type=module <<'JS'
-          const account='https://api.cloudflare.com/client/v4/accounts/c917ac1c9a3824a210d0fb77e5879329';
-          const tag='30076dfd961942a38aaddc29dc3876e1';
-          const script='/workers/scripts/superior-command-center';
-          async function api(path,method='GET',body){
-            const r=await fetch(account+path,{method,headers:{Authorization:'Bearer '+process.env.CLOUDFLARE_API_TOKEN,...(body?{'Content-Type':'application/json'}:{})},...(body?{body:JSON.stringify(body)}:{})});
-            const p=await r.json();
-            if(!r.ok||!p.success)throw Error('Recovery API failed (HTTP '+r.status+'; codes '+(p.errors||[]).map(e=>Number.isInteger(e.code)?e.code:'unknown').join(',')+').');
-            return p.result;
-          }
-          await api('/builds/workers/'+tag,'PATCH',{auto_build_enabled:false});
-          const config=await api('/builds/workers/'+tag);
-          if(config.auto_build_enabled!==false)throw Error('Duplicate auto-build did not disable; stopped.');
-          console.log('Duplicate Cloudflare auto-build disabled. Existing build credentials preserved.');
-          const healthy='90f42d83-2bf5-46bb-bc51-7f4efc9de5ee';
-          await api(script+'/deployments','POST',{strategy:'percentage',versions:[{version_id:healthy,percentage:100}]});
-          console.log('Restored the last verified healthy version without D1 writes.');
-          const history=await api(script+'/versions?per_page=30');
-          const inherit=new Map();
-          for(const item of history.items||[]){
-            const version=await api(script+'/versions/'+item.id);
-            for(const binding of version.resources?.bindings||[]){
-              if(['secret_text','secret_key','plain_text','json'].includes(binding.type)&&!inherit.has(binding.name))inherit.set(binding.name,{name:binding.name,type:'inherit',version_id:item.id});
-            }
-          }
-          for(const name of ['OWNER_PASSWORD','SESSION_SECRET','MICROSOFT_CLIENT_ID','MICROSOFT_CLIENT_SECRET']){
-            if(!inherit.has(name))throw Error('Required credential binding is not recoverable: '+name);
-          }
-          const staged=await api('/workers/workers/'+tag+'/versions?deploy=false','POST',{
-            compatibility_date:'2026-11-03',
-            main_module:'recovery-staging.js',
-            modules:[{name:'recovery-staging.js',content_type:'application/javascript+module',content_base64:Buffer.from('export default {fetch(){return new Response("Recovery staging version; do not deploy",{status:503})}}').toString('base64')}],
-            bindings:[...inherit.values(),{name:'DB',type:'d1',id:'4feb6f63-1102-467a-87e6-256309364f12'}],
-            annotations:{'workers/message':'Preserve existing credential references before verified Actions deployment; staging only'}
-          });
-          console.log('Prepared credential inheritance version without deploying it: '+staged.id);
-          const bindings=(await api(script+'/settings')).bindings||[];
-          for(const name of ['OWNER_PASSWORD','SESSION_SECRET','DB','MICROSOFT_CLIENT_ID','MICROSOFT_CLIENT_SECRET']){
-            const binding=bindings.find(b=>b.name===name);
-            console.log(name+': '+(binding?'present':'missing'));
-            if(!binding)throw Error('Latest-upload binding verification failed; stopped.');
-          }
-          console.log('Credential references recovered without reading or replacing secret values. No D1 records were modified.');
-          JS
-      - name: Verify restored live service
-        working-directory: cloudflare-command-center
-        run: |
-          echo 'https://superior-command-center.superiormandr.workers.dev' > "$RUNNER_TEMP/restored-url.log"
-          node scripts/verify-deployment.mjs "$RUNNER_TEMP/restored-url.log"
+          echo 'https://superior-command-center.superiormandr.workers.dev' > "$RUNNER_TEMP/superior-live.log"
+          node scripts/verify-deployment.mjs "$RUNNER_TEMP/superior-live.log"
