@@ -110,7 +110,7 @@ export async function backupStatus(env) {
   let decryptError = false;
   if (connected) try { await decryptToken(conn.refresh_token, env); } catch { connected=false; decryptError=true; }
   return {
-    configured:ready, connected, email:emailFor(env), folderUrl:folderUrl(env,conn?.folder_id),
+    configured:ready, connected, email:emailFor(env), folderUrl:conn?.folder_id ? folderUrl(env,conn.folder_id) : null,
     lastBackupAt:conn?.last_backup_at || null, lastDriveBackupAt:conn?.last_drive_backup_at || null,
     lastEmailBackupAt:conn?.last_email_backup_at || null,
     lastError:decryptError ? 'Google authorization needs to be renewed. Connect Google backups again.' : conn?.last_error || null,
@@ -159,8 +159,9 @@ export async function completeGoogleConnection(req, env) {
   } catch { return redirect(req, 'backup-error'); }
 }
 
-function resultFor(env, run) {
-  return {runId:run.id,filename:run.filename,savedAt:run.completed_at || null,folderUrl:folderUrl(env),driveSaved:Boolean(run.drive_file_id),emailSent:run.email_state==='sent',status:run.status};
+async function resultFor(env, run) {
+  const conn = await connection(env);
+  return {runId:run.id,filename:run.filename,savedAt:run.completed_at || null,folderUrl:conn?.folder_id ? folderUrl(env,conn.folder_id) : null,driveSaved:Boolean(run.drive_file_id),emailSent:run.email_state==='sent',status:run.status};
 }
 async function completeRun(env, runId) {
   const completed = now();
@@ -194,7 +195,7 @@ async function uploadedPayload(env, access, fileId) {
   if (backup.app!==APP || backup.version!==1 || !Array.isArray(backup.estimates) || !Array.isArray(backup.invoices) || !Array.isArray(backup.reviews)) throw Error('The saved Drive backup is not a valid recoverable backup.');
   return payload;
 }
-function mimeMessage(env, run, payload, runHash) {
+function mimeMessage(env, run, payload, runHash, folderId) {
   const boundary = 'superior-backup-' + runHash;
   const attachment = base64(encoder.encode(payload)).match(/.{1,76}/g)?.join('\r\n') || '';
   const message = [
@@ -204,7 +205,7 @@ function mimeMessage(env, run, payload, runHash) {
     'MIME-Version: 1.0', 'Content-Type: multipart/mixed; boundary="' + boundary + '"', '',
     '--' + boundary, 'Content-Type: text/plain; charset=UTF-8', '',
     'Your complete Superior Command Center backup is attached as a JSON file.',
-    'The same file is saved in your private Google Drive backup folder:', folderUrl(env),
+    'The same file is saved in your private Google Drive backup folder:', folderUrl(env,folderId),
     'Keep this attachment private. Restore missing records from Backup & Restore in your Command Center.', '',
     '--' + boundary, 'Content-Type: application/json; name="' + run.filename + '"',
     'Content-Disposition: attachment; filename="' + run.filename + '"',
@@ -307,7 +308,7 @@ export async function runCloudBackup(env, {runId='manual-' + random(16),trigger=
     if (!payload) payload = await uploadedPayload(env,access,run.drive_file_id);
     await env.DB.prepare("UPDATE backup_runs SET email_state='sending',status='sending' WHERE id=?").bind(runId).run();
     try {
-      const response = await google(env,GMAIL,{method:'POST',headers:{Authorization:'Bearer ' + access,'Content-Type':'application/json'},body:JSON.stringify({raw:mimeMessage(env,run,payload,await hash(runId))})}, 'Gmail did not confirm the emailed backup.');
+      const response = await google(env,GMAIL,{method:'POST',headers:{Authorization:'Bearer ' + access,'Content-Type':'application/json'},body:JSON.stringify({raw:mimeMessage(env,run,payload,await hash(runId),conn.folder_id)})}, 'Gmail did not confirm the emailed backup.');
       const sent = await jsonResponse(response,'Email delivery is unconfirmed. Check Gmail before retrying this backup.');
       if (typeof sent.id!=='string' || !sent.id) throw new GoogleFailure('Email delivery is unconfirmed. Check Gmail before retrying this backup.',{ambiguous:true});
       await env.DB.prepare("UPDATE backup_runs SET email_state='sent',email_message_id=? WHERE id=?").bind(sent.id,runId).run();
