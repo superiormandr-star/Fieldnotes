@@ -31,6 +31,7 @@ jobs:
           const allow=['OWNER_PASSWORD','SESSION_SECRET','DB','MICROSOFT_CLIENT_ID','MICROSOFT_CLIENT_SECRET','GOOGLE_CLIENT_ID','GOOGLE_CLIENT_SECRET'];
           const describe=bindings=>allow.map(name=>({name,type:bindings.find(b=>b.name===name)?.type||'missing'}));
           const settings=await api('/settings');
+          console.log('Settings response keys: '+Object.keys(settings).join(', '));
           console.log('Settings metadata: '+JSON.stringify(describe(settings.bindings||[])));
           const deployments=await api('/deployments');
           console.log('Deployment versions: '+JSON.stringify((deployments.deployments||[]).slice(0,5).map(d=>({created_on:d.created_on,source:d.source,versions:d.versions}))));
@@ -40,4 +41,13 @@ jobs:
           }
           const subdomain=await api('/subdomain');
           console.log('Workers.dev enabled: '+Boolean(subdomain.enabled));
+          const response=await fetch('https://api.cloudflare.com/client/v4/accounts/c917ac1c9a3824a210d0fb77e5879329/builds/triggers',{headers:{Authorization:'Bearer '+process.env.CLOUDFLARE_API_TOKEN}});
+          console.log('Build trigger inspection HTTP '+response.status);
+          const builds=await response.json();
+          console.log('Build response keys: '+Object.keys(builds.result||{}).join(', '));
+          const entries=Array.isArray(builds.result)?builds.result:(builds.result?.triggers||builds.result?.items||[]);
+          for(const entry of entries){
+            const identifier=entry.trigger_uuid||entry.id||'';
+            console.log('Build trigger metadata: '+JSON.stringify({id:/^[0-9a-f-]{36}$/.test(identifier)?identifier:'unavailable',keys:Object.keys(entry),target:entry.worker_name==='superior-command-center',correctRoot:entry.root_directory==='cloudflare-command-center',assetFlag:/--assets/.test(entry.deploy_command||'')}));
+          }
           JS
