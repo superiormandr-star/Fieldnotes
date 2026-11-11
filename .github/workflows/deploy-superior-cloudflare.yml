@@ -41,13 +41,25 @@ jobs:
           }
           const subdomain=await api('/subdomain');
           console.log('Workers.dev enabled: '+Boolean(subdomain.enabled));
-          const response=await fetch('https://api.cloudflare.com/client/v4/accounts/c917ac1c9a3824a210d0fb77e5879329/builds/triggers',{headers:{Authorization:'Bearer '+process.env.CLOUDFLARE_API_TOKEN}});
-          console.log('Build trigger inspection HTTP '+response.status);
-          const builds=await response.json();
-          console.log('Build response keys: '+Object.keys(builds.result||{}).join(', '));
-          const entries=Array.isArray(builds.result)?builds.result:(builds.result?.triggers||builds.result?.items||[]);
-          for(const entry of entries){
-            const identifier=entry.trigger_uuid||entry.id||'';
-            console.log('Build trigger metadata: '+JSON.stringify({id:/^[0-9a-f-]{36}$/.test(identifier)?identifier:'unavailable',keys:Object.keys(entry),target:entry.worker_name==='superior-command-center',correctRoot:entry.root_directory==='cloudflare-command-center',assetFlag:/--assets/.test(entry.deploy_command||'')}));
+          const accountRoot='https://api.cloudflare.com/client/v4/accounts/c917ac1c9a3824a210d0fb77e5879329';
+          async function inspect(path){
+            const r=await fetch(accountRoot+path,{headers:{Authorization:'Bearer '+process.env.CLOUDFLARE_API_TOKEN}});
+            const p=await r.json();
+            console.log('Inspection '+path.split('?')[0]+' HTTP '+r.status);
+            return p.success?p.result:null;
+          }
+          const scripts=await inspect('/workers/scripts');
+          const script=scripts?.find(x=>x.id==='superior-command-center');
+          if(script?.tag){
+            const builds=await inspect('/builds/workers/'+script.tag);
+            if(builds)console.log('Build configuration: '+JSON.stringify({keys:Object.keys(builds),correctRoot:builds.production_settings?.root_directory==='cloudflare-command-center',assetsDeploy:/--assets/.test(builds.production_settings?.deploy_command||''),productionMain:builds.git_repository?.branch==='main',scriptTag:script.tag}));
+          }
+          const workers=await inspect('/workers/workers');
+          const worker=workers?.find(x=>x.name==='superior-command-center');
+          if(worker)console.log('Target Worker UUID: '+worker.id);
+          const history=await api('/versions?per_page=30');
+          for(const item of (history.items||[]).slice(0,30)){
+            const v=await api('/versions/'+item.id),bindings=v.resources?.bindings||[];
+            console.log('History version: '+JSON.stringify({id:item.id,created_on:v.metadata?.created_on,source:v.metadata?.source,owner:bindings.some(b=>b.name==='OWNER_PASSWORD'),session:bindings.some(b=>b.name==='SESSION_SECRET'),microsoftId:bindings.some(b=>b.name==='MICROSOFT_CLIENT_ID'),microsoftSecret:bindings.some(b=>b.name==='MICROSOFT_CLIENT_SECRET')}));
           }
           JS
