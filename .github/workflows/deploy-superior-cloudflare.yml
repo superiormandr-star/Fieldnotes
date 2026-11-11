@@ -1,4 +1,4 @@
-name: Restore verified Superior Worker version
+name: Diagnose Superior Worker binding metadata
 on:
   workflow_dispatch:
 permissions:
@@ -15,7 +15,7 @@ jobs:
       - uses: actions/setup-node@v4
         with:
           node-version: '24'
-      - name: Restore last verified version without modifying D1 or credentials
+      - name: Read Worker binding and version metadata without values
         env:
           CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
         run: |
@@ -28,19 +28,16 @@ jobs:
             if(!r.ok||!data.success)throw Error('Worker recovery API failed: HTTP '+r.status);
             return data.result;
           }
-          const previous=await api('/versions/'+version);
-          const bindings=previous.resources?.bindings||[];
-          for(const name of ['OWNER_PASSWORD','SESSION_SECRET','DB']){
-            const b=bindings.find(b=>b.name===name);
-            console.log(name+': '+(b?'present in recovery version':'missing in recovery version'));
-            if(!b)throw Error('Verified version is missing a required binding; recovery stopped.');
-            if(name==='DB'&&b.id!=='4feb6f63-1102-467a-87e6-256309364f12')throw Error('Recovery database binding does not match; stopped.');
+          const allow=['OWNER_PASSWORD','SESSION_SECRET','DB','MICROSOFT_CLIENT_ID','MICROSOFT_CLIENT_SECRET','GOOGLE_CLIENT_ID','GOOGLE_CLIENT_SECRET'];
+          const describe=bindings=>allow.map(name=>({name,type:bindings.find(b=>b.name===name)?.type||'missing'}));
+          const settings=await api('/settings');
+          console.log('Settings metadata: '+JSON.stringify(describe(settings.bindings||[])));
+          const deployments=await api('/deployments');
+          console.log('Deployment versions: '+JSON.stringify((deployments.deployments||[]).slice(0,5).map(d=>({created_on:d.created_on,versions:d.versions}))));
+          for(const id of [version,'34725ae3-6216-40dc-a0d1-34cf4d84663a']){
+            const v=await api('/versions/'+id);
+            console.log('Version '+id+': '+JSON.stringify({created_on:v.metadata?.created_on,bindings:describe(v.resources?.bindings||[])}));
           }
-          await api('/deployments',{strategy:'percentage',versions:[{version_id:version,percentage:100}]});
-          console.log('Restored last verified Worker version. No D1 writes or secret updates were performed.');
+          const subdomain=await api('/subdomain');
+          console.log('Workers.dev enabled: '+Boolean(subdomain.enabled));
           JS
-      - name: Verify restored live D1 and owner protection
-        working-directory: cloudflare-command-center
-        run: |
-          echo 'https://superior-command-center.superiormandr.workers.dev' > "$RUNNER_TEMP/restored-url.log"
-          node scripts/verify-deployment.mjs "$RUNNER_TEMP/restored-url.log"
