@@ -33,10 +33,10 @@ jobs:
           const settings=await api('/settings');
           console.log('Settings metadata: '+JSON.stringify(describe(settings.bindings||[])));
           const deployments=await api('/deployments');
-          console.log('Deployment versions: '+JSON.stringify((deployments.deployments||[]).slice(0,5).map(d=>({created_on:d.created_on,versions:d.versions}))));
-          for(const id of [version,'34725ae3-6216-40dc-a0d1-34cf4d84663a']){
+          console.log('Deployment versions: '+JSON.stringify((deployments.deployments||[]).slice(0,5).map(d=>({created_on:d.created_on,source:d.source,versions:d.versions}))));
+          for(const id of [...new Set([version,...(deployments.deployments||[]).slice(0,6).flatMap(d=>d.versions.map(v=>v.version_id))])]){
             const v=await api('/versions/'+id);
-            console.log('Version '+id+': '+JSON.stringify({created_on:v.metadata?.created_on,bindings:describe(v.resources?.bindings||[])}));
+            console.log('Version '+id+': '+JSON.stringify({created_on:v.metadata?.created_on,source:v.metadata?.source,handlers:v.resources?.script?.handlers,bindings:describe(v.resources?.bindings||[])}));
           }
           const subdomain=await api('/subdomain');
           console.log('Workers.dev enabled: '+Boolean(subdomain.enabled));
