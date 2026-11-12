@@ -1,25 +1,41 @@
-name: Validate OneDrive integration
+name: Read-only live OneDrive and scheduler readiness
 on:
-  push:
-    branches: [feature/onedrive-backup-integration]
-    paths:
-      - 'cloudflare-command-center/**'
-      - '.github/workflows/validate-onedrive.yml'
   workflow_dispatch:
 permissions:
   contents: read
 jobs:
-  test:
+  inspect:
     runs-on: ubuntu-latest
+    environment: CLOUDFLARE_API_TOKEN
     defaults:
       run:
         working-directory: cloudflare-command-center
+    env:
+      CLOUDFLARE_ACCOUNT_ID: c917ac1c9a3824a210d0fb77e5879329
+      CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
     steps:
       - uses: actions/checkout@v4
+        with:
+          ref: main
       - uses: actions/setup-node@v4
         with:
           node-version: '24'
-      - run: npm install --no-audit --no-fund
-      - run: npm run build
-      - run: npm test
-      - run: npx wrangler deploy --dry-run
+      - name: Check deployment source
+        run: node scripts/inspect-deployment-source.mjs
+      - name: Inspect binding presence without values
+        run: node scripts/inspect-worker-settings.mjs
+      - name: Inspect encrypted Microsoft connection and confirmed upload receipt
+        run: node scripts/inspect-onedrive-readiness.mjs
+      - name: Inspect live automatic schedule without changing it
+        run: |
+          node --input-type=module <<'JS'
+          const r=await fetch('https://api.cloudflare.com/client/v4/accounts/c917ac1c9a3824a210d0fb77e5879329/workers/scripts/superior-command-center/schedules',{headers:{Authorization:'Bearer '+process.env.CLOUDFLARE_API_TOKEN},signal:AbortSignal.timeout(20000)});
+          const p=await r.json();
+          if(!r.ok||!p.success)throw Error('Read-only schedule inspection failed (HTTP '+r.status+').');
+          const schedules=Array.isArray(p.result)?p.result:p.result.schedules;
+          console.log('Live automatic Cron schedules: '+JSON.stringify(schedules.map(s=>s.cron)));
+          JS
+      - name: Check live website and D1 health
+        run: |
+          echo 'https://superior-command-center.superiormandr.workers.dev' > "$RUNNER_TEMP/superior-live.log"
+          node scripts/verify-deployment.mjs "$RUNNER_TEMP/superior-live.log"
