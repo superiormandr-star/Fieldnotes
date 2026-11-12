@@ -1,4 +1,4 @@
-name: Verify automatic OneDrive upload and restore schedule
+name: Verify isolated live customer approval and invoice persistence
 on:
   workflow_dispatch:
 permissions:
@@ -9,84 +9,18 @@ concurrency:
 jobs:
   verify:
     runs-on: ubuntu-latest
-    timeout-minutes: 12
+    timeout-minutes: 5
     environment: CLOUDFLARE_API_TOKEN
     env:
       CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
     steps:
       - uses: actions/checkout@v4
-        with:
-          ref: main
       - uses: actions/setup-node@v4
         with:
           node-version: '24'
-      - name: Verify real scheduled OneDrive upload without invoking manual backup
-        run: |
-          node --input-type=module <<'JS'
-          import {writeFile} from 'node:fs/promises';
-          const root='https://api.cloudflare.com/client/v4/accounts/c917ac1c9a3824a210d0fb77e5879329';
-          const schedulePath='/workers/scripts/superior-command-center/schedules';
-          async function api(path,method='GET',body){
-            const r=await fetch(root+path,{method,headers:{Authorization:'Bearer '+process.env.CLOUDFLARE_API_TOKEN,...(body?{'Content-Type':'application/json'}:{})},...(body?{body:JSON.stringify(body)}:{}),signal:AbortSignal.timeout(20000)});
-            const p=await r.json();
-            if(!r.ok||!p.success)throw Error('Scheduled verification API failed (HTTP '+r.status+').');
-            return p.result;
-          }
-          async function receipt(){
-            const result=await api('/d1/database/4feb6f63-1102-467a-87e6-256309364f12/query','POST',{sql:'SELECT last_backup_at FROM microsoft_backup_connection WHERE id=1'});
-            const row=result[0]?.results?.[0];
-            if(!row)throw Error('Microsoft connection is not stored; scheduled verification stopped.');
-            return row.last_backup_at;
-          }
-          const previous=await receipt();
-          if(previous)throw Error('A backup receipt already exists; do not reset backup state to force a test.');
-          const response=await api(schedulePath);
-          const schedules=Array.isArray(response)?response:response.schedules;
-          if(!Array.isArray(schedules)||schedules.length!==1||schedules[0].cron!=='*/15 * * * *')throw Error('Unexpected production schedule; stopped without modifying it.');
-          const original=schedules.map(s=>({cron:s.cron}));
-          await writeFile(process.env.RUNNER_TEMP+'/superior-original-schedules.json',JSON.stringify(original),{mode:0o600});
-          const started=Date.now();
-          try{
-            await api(schedulePath,'PUT',[{cron:'* * * * *'}]);
-            console.log('Temporary one-minute automatic trigger enabled; manual backup endpoint is not invoked.');
-            let confirmed=false;
-            while(Date.now()-started<8*60*1000){
-              const stamp=await receipt();
-              if(stamp&&Number.isFinite(Date.parse(stamp))&&Date.parse(stamp)>=started){
-                console.log('PASS: actual scheduled OneDrive upload confirmed at '+new Date(stamp).toISOString());
-                confirmed=true;break;
-              }
-              console.log('Waiting for the first automatic OneDrive upload receipt.');
-              await new Promise(resolve=>setTimeout(resolve,15000));
-            }
-            if(!confirmed)throw Error('No automatic upload receipt within the verification window. Cron propagation may still be pending.');
-          }finally{
-            await api(schedulePath,'PUT',original);
-            const restored=await api(schedulePath);
-            const current=Array.isArray(restored)?restored:restored.schedules;
-            if(JSON.stringify(current.map(s=>({cron:s.cron})))!==JSON.stringify(original))throw Error('Original schedule restoration could not be verified.');
-            console.log('Original automatic schedule restored and verified: */15 * * * *');
-          }
-          JS
-      - name: Always restore the original production schedule
-        if: always()
-        run: |
-          node --input-type=module <<'JS'
-          import {readFile} from 'node:fs/promises';
-          let original;
-          try{original=JSON.parse(await readFile(process.env.RUNNER_TEMP+'/superior-original-schedules.json','utf8'));}catch{console.log('No schedule change was prepared.');process.exit(0);}
-          const r=await fetch('https://api.cloudflare.com/client/v4/accounts/c917ac1c9a3824a210d0fb77e5879329/workers/scripts/superior-command-center/schedules',{method:'PUT',headers:{Authorization:'Bearer '+process.env.CLOUDFLARE_API_TOKEN,'Content-Type':'application/json'},body:JSON.stringify(original),signal:AbortSignal.timeout(20000)});
-          const payload=await r.json();
-          if(!r.ok||!payload.success)throw Error('Final production schedule restoration failed (HTTP '+r.status+').');
-          console.log('Production schedule restoration confirmed.');
-          JS
-      - name: Report final Microsoft connection and upload receipt
-        if: always()
-        working-directory: cloudflare-command-center
-        env:
-          CLOUDFLARE_ACCOUNT_ID: c917ac1c9a3824a210d0fb77e5879329
-        run: node scripts/inspect-onedrive-readiness.mjs
-      - name: Verify website and live D1 readiness
+      - name: Verify live customer workflow with only generated QA records
+        run: node ops/verify-live-customer-flow.mjs
+      - name: Verify actual site and D1 readiness
         if: always()
         working-directory: cloudflare-command-center
         run: |
