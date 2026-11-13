@@ -1,0 +1,26 @@
+name: Inspect isolated ProConnect storage readiness
+on:
+  push:
+    branches: [ops/proconnect-storage-readiness]
+    paths: [.github/workflows/inspect-proconnect-storage.yml]
+  workflow_dispatch:
+permissions:
+  contents: read
+jobs:
+  inspect:
+    runs-on: ubuntu-latest
+    environment: CLOUDFLARE_API_TOKEN
+    steps:
+      - name: Inspect account plan and database permissions without reading customer records
+        env:
+          CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+        run: |
+          node --input-type=module <<'JS'
+          const base='https://api.cloudflare.com/client/v4/accounts/c917ac1c9a3824a210d0fb77e5879329';
+          if(!process.env.CLOUDFLARE_API_TOKEN)throw Error('Existing Cloudflare authorization unavailable.');
+          for(const resource of ['/subscriptions','/d1/database']){
+            const r=await fetch(base+resource,{headers:{Authorization:'Bearer '+process.env.CLOUDFLARE_API_TOKEN},signal:AbortSignal.timeout(20000)});
+            const value=await r.json();
+            console.log(JSON.stringify({resource,status:r.status,authorized:r.ok&&value.success,items:r.ok?(value.result||[]).map(x=>resource==='/subscriptions'?{plan:x.rate_plan?.public_name||x.rate_plan?.id,status:x.state}:{name:x.name,id:x.uuid}):[],errors:(value.errors||[]).map(e=>({code:e.code,message:e.message}))}));
+          }
+          JS
