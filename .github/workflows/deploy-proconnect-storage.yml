@@ -1,0 +1,24 @@
+name: Deploy isolated ProConnect private storage
+on:
+  push:
+    branches: [ops/proconnect-storage-readiness]
+    paths: [.github/workflows/deploy-proconnect-storage.yml]
+  workflow_dispatch:
+permissions:
+  contents: read
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    environment: CLOUDFLARE_API_TOKEN
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+        with:
+          repository: superiormandr-star/Handymanservicesapp
+          ref: 8ac41fbb6a62fa81d2dbaa282aa7ef62ca32278d
+          persist-credentials: false
+      - name: Deploy ProConnect-only service with free-account guard
+        env:
+          CLOUDFLARE_ACCOUNT_ID: c917ac1c9a3824a210d0fb77e5879329
+          CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+        run: node scripts/deploy-storage.mjs
